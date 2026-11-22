@@ -28,8 +28,10 @@ use plist::{Dictionary, Value};
 use super::{Ctl, FRAMES, Failure, LATENCY, MAX_MESSAGE, RATE, Rtsp, Speaker, TIMEOUT, Worker, pair, random};
 
 /// How soon after an anchor its first frame plays: the rest of `LATENCY` is sent at once,
-/// so starting, seeking or playing again is heard in this long rather than in `LATENCY`.
+/// so starting or seeking is heard in this long rather than in `LATENCY`.
 const LEAD: f64 = 0.5;
+/// The same, playing again after a pause: what it plays first, it already holds.
+const RESUME_LEAD: f64 = 0.2;
 
 /// How long the speaker gets to start sending its clock after SETPEERS.
 pub const CLOCK_WAIT: Duration = Duration::from_secs(12);
@@ -106,7 +108,7 @@ impl Buffered {
 
         let volume = rtsp.volume();
         let mut session = Self { rtsp, events, clock, data, key, stream_id, anchor: (0, 0.0), identity, volume };
-        session.set_anchor(0)?;
+        session.set_anchor(0, LEAD)?;
         Ok(session)
     }
 
@@ -117,13 +119,13 @@ impl Buffered {
         Some(rtp.wrapping_add(((now - at).max(0.0) * f64::from(RATE)) as u32))
     }
 
-    /// Ties RTP time `rtp` to `LEAD` from now on the speaker's clock, playing.
-    fn set_anchor(&mut self, rtp: u32) -> anyhow::Result<()> {
+    /// Ties RTP time `rtp` to `lead` seconds from now on the speaker's clock, playing.
+    fn set_anchor(&mut self, rtp: u32, lead: f64) -> anyhow::Result<()> {
         let (identity, now) = self.clock.now().ok_or_else(|| anyhow!("lost the speaker's clock"))?;
         if identity != self.identity {
             bail!("the speaker's clock changed");
         }
-        let at = now + LEAD;
+        let at = now + lead;
         let secs = at.floor();
         // The fraction as a 64-bit binary fraction; over a half, the sign bit, as it should.
         let frac = ((at - secs) * 2f64.powi(64)) as u64;
@@ -171,7 +173,7 @@ impl Buffered {
                                 paused = Some(rtp);
                                 flushed.map(drop)
                             }
-                            None => flushed.and_then(|_| self.set_anchor(rtp)),
+                            None => flushed.and_then(|_| self.set_anchor(rtp, LEAD)),
                         }
                     }
                     // Rate 0: it stops where it is, keeping what it holds.
@@ -181,7 +183,7 @@ impl Buffered {
                         binary(&Value::Dictionary(body)).and_then(|b| self.rtsp.request("SETRATEANCHORTIME", None, &[], Some((PLIST, &b)))).map(drop)
                     }
                     Ctl::Resume => match paused.take() {
-                        Some(at) => self.set_anchor(at),
+                        Some(at) => self.set_anchor(at, RESUME_LEAD),
                         None => Ok(()),
                     },
                     Ctl::Pause => Ok(()),
@@ -227,7 +229,7 @@ impl Buffered {
                 // Behind by more than the lead (the computer slept): everything from here
                 // would arrive late and be dropped, so it's timed afresh.
                 log::info!("airplay: fell {:.1} s behind, anchoring again", -wait);
-                if let Err(e) = self.set_anchor(rtp) {
+                if let Err(e) = self.set_anchor(rtp, LEAD) {
                     log::warn!("airplay: {e:#}");
                     break true;
                 }

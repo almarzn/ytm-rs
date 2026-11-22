@@ -1249,6 +1249,9 @@ fn run(
     let mut rewind: Option<Duration> = None;
     // Paused by an AirPlay 2 speaker pausing itself, which holds what it was sent.
     let mut held = false;
+    // A song was cut short (a skip): what the speaker's sent till the next one starts is
+    // silence, to go then, not play before it.
+    let mut cut = false;
     // Whether the volume was the speaker's, last time round: it changes hands with the output.
     let mut on_speaker = false;
     loop {
@@ -1299,6 +1302,11 @@ fn run(
                 for f in fading.iter_mut().filter(|f| f.waiting.is_some()) {
                     fade_in = f.start(crossfade);
                     log::debug!("audio: crossfade into generation {generation} over {fade_in} ms");
+                }
+                // After a skip, the silence sent while this song loaded goes, so it's heard
+                // now rather than after it. (A song that ended keeps its last seconds.)
+                if std::mem::take(&mut cut) && fade_in == 0 {
+                    output.flush();
                 }
                 fade_out = Arc::new(AtomicU32::new(0));
                 norm = Arc::new(AtomicU32::new(gain.to_bits()));
@@ -1504,6 +1512,7 @@ fn run(
                 // it goes too. One that ended keeps it, the end of the song still to be heard.
                 if (current != 0 && !player.empty()) || fading.iter().any(|f| !f.player.empty()) {
                     output.flush();
+                    cut = true;
                 }
                 rewind = None;
                 if matches!(cmd, AudioCmd::Handoff) {
